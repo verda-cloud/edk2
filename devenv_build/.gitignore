@@ -1,0 +1,7 @@
+# devenv working state and build artefacts. devenv.lock is deliberately NOT
+# ignored: it pins the exact nixpkgs revision and is what makes the firmware
+# hash, and therefore the SEV-SNP launch measurement, reproducible.
+/out/
+/.devenv/
+/.devenv.flake.nix
+/.direnv/
