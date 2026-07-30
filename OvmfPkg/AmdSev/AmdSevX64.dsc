@@ -481,6 +481,16 @@
   gEmbeddedTokenSpaceGuid.PcdMemoryTypeEfiRuntimeServicesCode|0x100
   gEmbeddedTokenSpaceGuid.PcdMemoryTypeEfiRuntimeServicesData|0x100
 
+  #
+  # Map memory with 1GB pages. Without this the DXE IPL builds page tables at
+  # 2MB granularity, and AmdSevDxe's pass that clears the C-bit across MMIO and
+  # NonExistent GCD space then has to walk 512x as many entries per TiB of
+  # 64-bit PCI aperture. A guest given a multi-TiB aperture (as needed to fit
+  # the BARs of several large-memory GPUs) never finishes that walk and hangs in
+  # firmware before reaching the OS loader. OvmfPkgX64.dsc already sets this.
+  #
+  gEfiMdeModulePkgTokenSpaceGuid.PcdUse1GPageTable|TRUE
+
   # Point to the MdeModulePkg/Application/BootManagerMenuApp/BootManagerMenuApp.inf
   gEfiMdeModulePkgTokenSpaceGuid.PcdBootManagerMenuFile|{ 0xdc, 0x5b, 0xc2, 0xee, 0xf2, 0x67, 0x95, 0x4d, 0xb1, 0xd5, 0xf8, 0x1b, 0x20, 0x39, 0xd1, 0x1d }
 
