@@ -34,21 +34,30 @@ Environment overrides: `EDK2` (checkout to build, defaults to this repo),
 
 ## Reproducibility caveats
 
-Both of these were established by measurement, and both silently change the
-launch measurement while every functional test still passes:
+These inputs are enforced or normalized by `build.sh` because each can silently
+change the launch measurement while every functional test still passes:
 
-- **Builds must be clean.** `build.sh` removes `Build/AmdSev` first. An
+- **The edk2 tree and required submodules must match Git.** Git already pins
+  OpenSSL and BaseTools' Brotli by commit (their URLs are not floating build
+  inputs), and the script verifies the required checkouts rather than only
+  checking for a file.
+- **Build tools and configuration must be clean.** Ignored BaseTools binaries
+  and `Conf/*.txt` can survive from an earlier compiler or edk2 revision. The
+  script rebuilds BaseTools and generates a private configuration on every run.
+- **Firmware builds must be clean.** `build.sh` removes `Build/AmdSev` first. An
   incremental build over a previous run's objects — especially a `--stock` run,
   which compiles the same sources with the opposite PCD — yields a different
   firmware image from a clean build of the same commit.
-- **The image embeds absolute build paths.** Clean builds are deterministic for a
-  given checkout path, but the same commit built at a different path produces
-  different bytes. `devenv` pins the toolchain; it cannot pin the path. To have
-  several machines agree on a measurement, build at a fixed canonical path inside
-  a container or chroot rather than in a per-user home directory.
+- **Compiler and assembler paths must be normalized.** GCC records absolute
+  paths in DWARF and NASM records its input filename in the ELF string table.
+  `GenFw` also sizes CodeView metadata from its input filename before clearing
+  it. The metadata size can alter padding in a few SEC/PEI PE images. The script
+  maps GCC paths to `/usr/src/edk2` and invokes NASM and `GenFw` with
+  workspace-relative paths. Their launchers are recreated under `Build/` on
+  every run, including after `git clean -fdx`.
 
-Treat "same commit + same `devenv.lock` + same absolute path" as the
-reproducibility unit.
+Treat "same commit (including Git-link commits) + same `devenv.lock` + same
+build options" as the reproducibility unit. The checkout path is not an input.
 
 ## Background
 
