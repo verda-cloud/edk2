@@ -1,0 +1,133 @@
+# @file amdsev-large-bars-build.yml
+#
+# Reproducible build of OvmfPkg/AmdSev/AmdSevX64.dsc with the pinned devenv
+# toolchain in devenv_build/. See devenv_build/README.md.
+#
+# This workflow is not part of upstream edk2; like devenv_build/ itself it
+# belongs to the amdsev-large-bars branch. It follows the same steps the README
+# gives a human: install Nix with flakes enabled, install devenv from nixpkgs,
+# initialise the submodules the build consumes, then run
+# "devenv shell -- ./build.sh" from devenv_build/.
+#
+# SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+name: AmdSev large-BAR firmware
+
+on:
+  # No paths filter: the firmware image is a hash input to the SEV-SNP launch
+  # measurement and depends on most of the tree (MdePkg, MdeModulePkg,
+  # CryptoPkg, UefiCpuPkg, ...), so a filter would silently skip real changes.
+  push:
+    branches: ['amdsev-large-bars']
+  pull_request:
+    branches: ['amdsev-large-bars']
+  workflow_dispatch:
+    inputs:
+      stock:
+        description: 'Control build: force PcdUse1GPageTable back to the upstream default'
+        type: boolean
+        default: false
+      target:
+        description: 'edk2 build target'
+        type: choice
+        default: RELEASE
+        options: [RELEASE, DEBUG]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build AmdSevX64 (${{ inputs.target || 'RELEASE' }}${{ inputs.stock && ', stock' || '' }})
+    runs-on: ubuntu-latest
+    steps:
+      # build.sh reports "git describe --tags", and --stock resolves the base
+      # tag with "git describe --tags --abbrev=0", so the tags and the history
+      # between them have to be present.
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      # Only the two submodules build.sh verifies and consumes, which is what
+      # makes this cheaper than the README's recursive init of the whole tree.
+      # Not recursive: openssl declares eleven submodules of its own for its
+      # test and fuzzing harnesses (krb5, quiche, wycheproof, ...) that edk2's
+      # OpensslLib never compiles, and brotli declares none. Leaving them
+      # uninitialised does not disturb build.sh's clean-tree check on openssl.
+      - name: Initialise the submodules the build consumes
+        run: |
+          git submodule update --init --depth 1 \
+            BaseTools/Source/C/BrotliCompress/brotli \
+            CryptoPkg/Library/OpensslLib/openssl
+
+      # actions/checkout leaves a detached HEAD for pull requests and tags,
+      # which build.sh would name the artefact "OVMF.amdsev.HEAD.fd" after.
+      # Moving a branch pointer to the commit already checked out leaves the
+      # working tree untouched, so build.sh's clean-tree check still holds.
+      - name: Name the checked-out branch
+        run: git switch -C "$(echo "${{ github.ref_name }}" | tr '/' '-')"
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            extra-substituters = https://devenv.cachix.org
+            extra-trusted-public-keys = devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw=
+
+      # From nixpkgs, as the README recommends: the toolchain itself is pinned
+      # by devenv.lock, so the devenv version used to enter the shell is not a
+      # build input.
+      - name: Install devenv
+        run: |
+          nix profile add nixpkgs#devenv
+          devenv version
+
+      - name: Build firmware
+        working-directory: devenv_build
+        env:
+          TARGET: ${{ inputs.target || 'RELEASE' }}
+        run: devenv shell -- ./build.sh ${{ inputs.stock && '--stock' || '' }}
+
+      - name: Record image identity
+        working-directory: devenv_build/out
+        run: |
+          sha256sum ./*.fd | tee SHA256SUMS
+          {
+            echo '### AmdSevX64 firmware'
+            echo
+            echo "| image | bytes | sha256 |"
+            echo "| --- | --- | --- |"
+            for FD in ./*.fd; do
+              printf "| \`%s\` | %s | \`%s\` |\n" \
+                "$(basename "$FD")" \
+                "$(stat -c%s "$FD")" \
+                "$(sha256sum "$FD" | cut -d' ' -f1)"
+            done
+            echo
+            echo "edk2 \`$(git describe --tags --always)\` (\`$(git rev-parse --short HEAD)\`)"
+            echo "with \`devenv_build/devenv.lock\` \`$(sha256sum ../devenv.lock | cut -c1-12)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: OVMF-amdsev-${{ inputs.target || 'RELEASE' }}-${{ github.sha }}
+          path: |
+            devenv_build/out/*.fd
+            devenv_build/out/SHA256SUMS
+          if-no-files-found: error
+
+      - name: Upload BaseTools logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: basetools-logs-${{ github.sha }}
+          path: /tmp/edk2_basetools*.log
+          if-no-files-found: ignore

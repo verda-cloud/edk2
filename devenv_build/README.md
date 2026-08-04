@@ -77,6 +77,23 @@ prints its size, sha256, the edk2 describe/commit, and the effective
 `PcdUse1GPageTable` value.
 
 
+## CI
+
+`.github/workflows/amdsev-large-bars-build.yml` runs the same two commands on
+`ubuntu-latest` for every push and pull request against `amdsev-large-bars`, and
+on demand via *Actions → AmdSev large-BAR firmware → Run workflow*, where
+`stock` and the build target are inputs. It installs Nix and `devenv` exactly as
+the prerequisites above describe, initialises only the two submodules `build.sh`
+verifies, uploads the `.fd` plus a `SHA256SUMS` as a build artefact, and prints
+the size, sha256, edk2 describe/commit and `devenv.lock` hash in the run summary
+so a measurement can be traced back to its inputs.
+
+The workflow deliberately has no `paths:` filter: the image hashes into the
+SEV-SNP launch measurement and depends on most of the tree, so filtering would
+skip real changes. Because a GitHub-hosted runner is a different machine from a
+developer's, a differing sha256 between CI and a local build is a reproducibility
+regression worth investigating rather than expected noise.
+
 ## Reproducibility caveats
 
 These inputs are enforced or normalized by `build.sh` because each can silently
