@@ -83,8 +83,11 @@ prints its size, sha256, the edk2 describe/commit, and the effective
 `ubuntu-latest` for every push and pull request against `amdsev-large-bars`, and
 on demand via *Actions → AmdSev large-BAR firmware → Run workflow*, where
 `stock` and the build target are inputs. It installs Nix and `devenv` exactly as
-the prerequisites above describe, initialises only the two submodules `build.sh`
-verifies, uploads the `.fd` plus a `SHA256SUMS` as a build artefact, and prints
+the prerequisites above describe, initialises the submodules non-recursively
+(edk2's meta-data parser resolves the `[Includes]` paths of every package it
+parses, so all of them must exist even though `AmdSevX64` links a few; openssl's
+own test and fuzzing submodules are never needed), uploads the `.fd` plus a
+`SHA256SUMS` as a build artefact, and prints
 the size, sha256, edk2 describe/commit and `devenv.lock` hash in the run summary
 so a measurement can be traced back to its inputs.
 

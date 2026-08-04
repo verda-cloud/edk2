@@ -6,7 +6,7 @@
 # This workflow is not part of upstream edk2; like devenv_build/ itself it
 # belongs to the amdsev-large-bars branch. It follows the same steps the README
 # gives a human: install Nix with flakes enabled, install devenv from nixpkgs,
-# initialise the submodules the build consumes, then run
+# initialise the submodules, then run
 # "devenv shell -- ./build.sh" from devenv_build/.
 #
 # SPDX-License-Identifier: BSD-2-Clause-Patent
@@ -49,22 +49,25 @@ jobs:
       # tag with "git describe --tags --abbrev=0", so the tags and the history
       # between them have to be present.
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
           submodules: false
 
-      # Only the two submodules build.sh verifies and consumes, which is what
-      # makes this cheaper than the README's recursive init of the whole tree.
-      # Not recursive: openssl declares eleven submodules of its own for its
-      # test and fuzzing harnesses (krb5, quiche, wycheproof, ...) that edk2's
-      # OpensslLib never compiles, and brotli declares none. Leaving them
-      # uninitialised does not disturb build.sh's clean-tree check on openssl.
-      - name: Initialise the submodules the build consumes
-        run: |
-          git submodule update --init --depth 1 \
-            BaseTools/Source/C/BrotliCompress/brotli \
-            CryptoPkg/Library/OpensslLib/openssl
+      # Every submodule, not just the two build.sh verifies: edk2's meta-data
+      # parser resolves the [Includes] paths of every package it parses, so a
+      # missing submodule fails the build even when AmdSevX64 links nothing
+      # from it ("MdePkg.dec(33): File/directory not found in workspace" for
+      # MipiSysTLib/mipisyst). Enumerating them would break again whenever a
+      # DEC gains an include path.
+      #
+      # Still not recursive, which is where this stays cheaper than the
+      # README's recursive init: openssl declares eleven submodules of its own
+      # for its test and fuzzing harnesses (krb5, quiche, wycheproof, ...) that
+      # edk2's OpensslLib never compiles. Leaving those uninitialised does not
+      # disturb build.sh's clean-tree check on openssl.
+      - name: Initialise submodules
+        run: git submodule update --init --depth 1
 
       # actions/checkout leaves a detached HEAD for pull requests and tags,
       # which build.sh would name the artefact "OVMF.amdsev.HEAD.fd" after.
@@ -116,7 +119,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload firmware
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: OVMF-amdsev-${{ inputs.target || 'RELEASE' }}-${{ github.sha }}
           path: |
@@ -126,7 +129,7 @@ jobs:
 
       - name: Upload BaseTools logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: basetools-logs-${{ github.sha }}
           path: /tmp/edk2_basetools*.log
