@@ -76,13 +76,6 @@ jobs:
       - name: Initialise submodules
         run: git submodule update --init --depth 1
 
-      # actions/checkout leaves a detached HEAD for pull requests and tags,
-      # which build.sh would name the artefact "OVMF.amdsev.HEAD.fd" after.
-      # Moving a branch pointer to the commit already checked out leaves the
-      # working tree untouched, so build.sh's clean-tree check still holds.
-      - name: Name the checked-out branch
-        run: git switch -C "$(echo "${{ github.ref_name }}" | tr '/' '-')"
-
       - name: Install Nix
         uses: cachix/install-nix-action@v31
         with:
@@ -115,8 +108,23 @@ jobs:
           TARGET: ${{ inputs.target || 'RELEASE' }}
           STOCK: ${{ inputs.stock }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           FD=$(ls ./*.fd)
+
+          # build.sh names its output after "git rev-parse --abbrev-ref HEAD",
+          # which is the branch on a branch push but "HEAD" on the detached
+          # checkout actions/checkout leaves for tags and pull requests. Name it
+          # after the ref here instead, the one place that needs to know. Do not
+          # rename a --stock control image: it is built from the opposite PCD
+          # value and must never be mistakable for the patched firmware.
+          WANT="OVMF.amdsev.$(echo "$REF_NAME" | tr '/' '-').fd"
+          case "$(basename "$FD")" in
+            *stock*) ;;
+            "$WANT") ;;
+            *) mv "$FD" "$WANT"; FD="./$WANT" ;;
+          esac
+
           sha256sum "$FD" > SHA256SUMS
 
           if [ "$STOCK" = 'true' ]; then
