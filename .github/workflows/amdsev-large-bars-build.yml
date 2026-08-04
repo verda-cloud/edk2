@@ -19,6 +19,9 @@ on:
   # CryptoPkg, UefiCpuPkg, ...), so a filter would silently skip real changes.
   push:
     branches: ['amdsev-large-bars']
+    # A tag build additionally publishes a release. Same job, so the firmware a
+    # release ships is produced by the definition every push already exercises.
+    tags: ['verda-amdsev-largebars-*']
   pull_request:
     branches: ['amdsev-large-bars']
   workflow_dispatch:
@@ -44,6 +47,10 @@ jobs:
   build:
     name: Build AmdSevX64 (${{ inputs.target || 'RELEASE' }}${{ inputs.stock && ', stock' || '' }})
     runs-on: ubuntu-latest
+    permissions:
+      contents: write      # create the release, on tag builds only
+      id-token: write      # Sigstore OIDC, for the build provenance attestation
+      attestations: write
     steps:
       # build.sh reports "git describe --tags", and --stock resolves the base
       # tag with "git describe --tags --abbrev=0", so the tags and the history
@@ -98,24 +105,53 @@ jobs:
           TARGET: ${{ inputs.target || 'RELEASE' }}
         run: devenv shell -- ./build.sh ${{ inputs.stock && '--stock' || '' }}
 
+      # Everything a third party needs to reconstruct this image, written once
+      # and reused by the run summary, the artifact and the release notes. The
+      # pinned nixpkgs revision matters more than any tool version string: it is
+      # what devenv.lock actually fixes, and therefore what fixes the compiler.
       - name: Record image identity
         working-directory: devenv_build/out
+        env:
+          TARGET: ${{ inputs.target || 'RELEASE' }}
+          STOCK: ${{ inputs.stock }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          sha256sum ./*.fd | tee SHA256SUMS
+          FD=$(ls ./*.fd)
+          sha256sum "$FD" > SHA256SUMS
+
+          if [ "$STOCK" = 'true' ]; then
+            PCD='FALSE (forced via --pcd, upstream default)'
+          elif grep -q 'PcdUse1GPageTable|TRUE' ../../OvmfPkg/AmdSev/AmdSevX64.dsc; then
+            PCD='TRUE (from DSC)'
+          else
+            PCD='FALSE (not set in DSC)'
+          fi
+
+          {
+            echo "image              $(basename "$FD")"
+            echo "size               $(stat -c%s "$FD") bytes"
+            echo "sha256             $(cut -d' ' -f1 SHA256SUMS)"
+            echo "edk2               $(git describe --tags --always) ($(git rev-parse HEAD))"
+            echo "build              $TARGET, GCC, OvmfPkg/AmdSev/AmdSevX64.dsc"
+            echo "PcdUse1GPageTable  $PCD"
+            echo "devenv.lock        sha256 $(sha256sum ../devenv.lock | cut -d' ' -f1)"
+            echo "pinned nixpkgs     $(jq -r '.nodes["nixpkgs-src"].locked.rev' ../devenv.lock)"
+            echo "built by           $RUN_URL"
+            echo
+            echo "Rebuild and compare:"
+            echo "  git clone https://github.com/${{ github.repository }}.git -b ${{ github.ref_name }} && cd edk2"
+            echo "  git submodule update --init --depth 1"
+            echo "  cd devenv_build && devenv shell -- ./build.sh"
+            echo "  sha256sum out/$(basename "$FD")"
+          } > PROVENANCE.txt
+
+          cat PROVENANCE.txt
           {
             echo '### AmdSevX64 firmware'
             echo
-            echo "| image | bytes | sha256 |"
-            echo "| --- | --- | --- |"
-            for FD in ./*.fd; do
-              printf "| \`%s\` | %s | \`%s\` |\n" \
-                "$(basename "$FD")" \
-                "$(stat -c%s "$FD")" \
-                "$(sha256sum "$FD" | cut -d' ' -f1)"
-            done
-            echo
-            echo "edk2 \`$(git describe --tags --always)\` (\`$(git rev-parse --short HEAD)\`)"
-            echo "with \`devenv_build/devenv.lock\` \`$(sha256sum ../devenv.lock | cut -c1-12)\`"
+            echo '```'
+            cat PROVENANCE.txt
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload firmware
@@ -125,7 +161,53 @@ jobs:
           path: |
             devenv_build/out/*.fd
             devenv_build/out/SHA256SUMS
+            devenv_build/out/PROVENANCE.txt
           if-no-files-found: error
+
+      # Sigstore-signed SLSA provenance, verifiable without a key to manage:
+      #   gh attestation verify --repo ${{ github.repository }} <image>
+      # This proves the asset came from this workflow at this commit. It does
+      # not prove the asset is correct -- only a rebuild does that -- so it
+      # guards the release assets rather than replacing the reproducibility.
+      - name: Attest build provenance
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: devenv_build/out/*.fd
+
+      # Releases, not workflow artifacts, are what nodes provision from:
+      # artifacts expire, need an authenticated API call, and carry no
+      # human-meaningful version. Idempotent so a re-run of a tag build
+      # refreshes the assets instead of failing on an existing release.
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        working-directory: devenv_build/out
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            cat <<'HEADER'
+          Reproducible `OvmfPkg/AmdSev/AmdSevX64.dsc` build for SEV-SNP guests that need
+          a multi-TiB 64-bit PCI aperture (large GPU BARs).
+
+          ```
+          HEADER
+            cat PROVENANCE.txt
+            cat <<'FOOTER'
+          ```
+
+          The asset below is a cache, not a trust anchor. Rebuild it from this tag with
+          the pinned toolchain and compare the sha256; see `devenv_build/README.md`.
+          FOOTER
+          } > NOTES.md
+
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" --clobber ./*.fd SHA256SUMS PROVENANCE.txt
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag \
+              --title "$GITHUB_REF_NAME" --notes-file NOTES.md \
+              ./*.fd SHA256SUMS PROVENANCE.txt
+          fi
 
       - name: Upload BaseTools logs on failure
         if: failure()

@@ -91,6 +91,38 @@ own test and fuzzing submodules are never needed), uploads the `.fd` plus a
 the size, sha256, edk2 describe/commit and `devenv.lock` hash in the run summary
 so a measurement can be traced back to its inputs.
 
+### Releases
+
+Pushing a `verda-amdsev-largebars-*` tag runs the same job and additionally
+publishes a GitHub release with the firmware, `SHA256SUMS` and a
+`PROVENANCE.txt` recording the image hash, the edk2 commit, the `devenv.lock`
+hash, the pinned nixpkgs revision, the effective `PcdUse1GPageTable` value and
+the commands to rebuild it. Provisioning consumes releases rather than workflow
+artifacts, which expire, need an authenticated API call and carry no
+human-meaningful version.
+
+Tag names are prefixed because this fork inherits every upstream `edk2-stable*`
+tag. `verda-amdsev-largebars-stable202605` is the branch point plus this
+branch's changes.
+
+The release asset is a cache, not a trust anchor. Two independent checks are
+available, and the second is the one that matters:
+
+```bash
+# Origin: Sigstore-signed SLSA provenance, no key to manage. Proves the asset
+# came from the workflow at that commit -- not that it is the right firmware.
+gh attestation verify --repo verda-cloud/edk2 OVMF.amdsev.<tag>.fd
+
+# Correctness: rebuild from the tag and compare. This is the zero-trust path;
+# it needs no trust in this repository's releases at all.
+sha256sum -c SHA256SUMS
+```
+
+Consumers should pin the sha256 wherever they fetch it (for Salt,
+`file.managed` + `source_hash`, with the hash in version-controlled pillar
+rather than a floating "latest"), so a firmware change is always a reviewable
+commit and the node fails closed on a mismatch.
+
 The workflow deliberately has no `paths:` filter: the image hashes into the
 SEV-SNP launch measurement and depends on most of the tree, so filtering would
 skip real changes. Because a GitHub-hosted runner is a different machine from a
