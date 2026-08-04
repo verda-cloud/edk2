@@ -58,6 +58,12 @@ cd devenv_build
 
 ## Use
 
+Clone the repository in the branch `amdsev-large-bars`:
+```bash
+git clone https://github.com/verda-cloud/edk2.git -b amdsev-large-bars
+cd edk2
+```
+
 From the repository root:
 
 ```bash
