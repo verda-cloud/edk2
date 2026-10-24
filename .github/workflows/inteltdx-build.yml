@@ -1,0 +1,206 @@
+# @file inteltdx-build.yml
+#
+# Reproducible build of OvmfPkg/IntelTdx/IntelTdxX64.dsc (the TDVF) for Intel
+# TDX guests, with Secure Boot disabled so QEMU direct kernel boot
+# (-kernel/-initrd/-append) is honoured and the guest kernel does not run in
+# lockdown. Ubuntu's OVMF.inteltdx.ms.fd is the same platform built with
+# SECURE_BOOT_ENABLE=TRUE and vendor keys enrolled.
+#
+# This workflow is not part of upstream edk2; like devenv_build/ itself it
+# belongs to the inteltdx branch and mirrors amdsev-large-bars-build.yml. It
+# follows the same steps the README gives a human: install Nix with flakes
+# enabled, install devenv from nixpkgs, initialise the submodules, then run
+# "devenv shell -- ./build-inteltdx.sh" from devenv_build/.
+#
+# SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+name: IntelTdx firmware (TDVF)
+
+on:
+  # No paths filter: the firmware image is the TDX MRTD and depends on most of
+  # the tree (MdePkg, MdeModulePkg, CryptoPkg, UefiCpuPkg, ...), so a filter
+  # would silently skip real changes.
+  push:
+    branches: ['inteltdx']
+    # A tag build additionally publishes a release. Same job, so the firmware a
+    # release ships is produced by the definition every push already exercises.
+    tags: ['verda-inteltdx-*']
+  pull_request:
+    branches: ['inteltdx']
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'edk2 build target'
+        type: choice
+        default: RELEASE
+        options: [RELEASE, DEBUG]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build IntelTdxX64 (${{ inputs.target || 'RELEASE' }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write      # create the release, on tag builds only
+      id-token: write      # Sigstore OIDC, for the build provenance attestation
+      attestations: write
+    steps:
+      # build.sh reports "git describe --tags", so the tags and the history
+      # between them have to be present.
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      # Every submodule, not just the two build.sh verifies: edk2's meta-data
+      # parser resolves the [Includes] paths of every package it parses, so a
+      # missing submodule fails the build even when IntelTdxX64 links nothing
+      # from it. Not recursive: openssl's own test and fuzzing submodules are
+      # never compiled by edk2's OpensslLib.
+      - name: Initialise submodules
+        run: git submodule update --init --depth 1
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            extra-substituters = https://devenv.cachix.org
+            extra-trusted-public-keys = devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw=
+
+      # From nixpkgs, as the README recommends: the toolchain itself is pinned
+      # by devenv.lock, so the devenv version used to enter the shell is not a
+      # build input.
+      - name: Install devenv
+        run: |
+          nix profile add nixpkgs#devenv
+          devenv version
+
+      - name: Build firmware
+        working-directory: devenv_build
+        env:
+          TARGET: ${{ inputs.target || 'RELEASE' }}
+        run: devenv shell -- ./build-inteltdx.sh
+
+      # Everything a third party needs to reconstruct this image, written once
+      # and reused by the run summary, the artifact and the release notes. The
+      # pinned nixpkgs revision matters more than any tool version string: it is
+      # what devenv.lock actually fixes, and therefore what fixes the compiler.
+      - name: Record image identity
+        working-directory: devenv_build/out
+        env:
+          TARGET: ${{ inputs.target || 'RELEASE' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          FD=$(ls ./*.fd)
+
+          # build-inteltdx.sh names its output after "git rev-parse --abbrev-ref HEAD",
+          # which is the branch on a branch push but "HEAD" on the detached
+          # checkout actions/checkout leaves for tags and pull requests. Name it
+          # after the ref here instead, the one place that needs to know.
+          WANT="OVMF.inteltdx.$(echo "$REF_NAME" | tr '/' '-').fd"
+          if [ "$(basename "$FD")" != "$WANT" ]; then
+            mv "$FD" "$WANT"; FD="./$WANT"
+          fi
+
+          sha256sum "$FD" > SHA256SUMS
+
+          {
+            echo "image               $(basename "$FD")"
+            echo "size                $(stat -c%s "$FD") bytes"
+            echo "sha256              $(cut -d' ' -f1 SHA256SUMS)"
+            echo "edk2                $(git describe --tags --always) ($(git rev-parse HEAD))"
+            echo "build               $TARGET, GCC, OvmfPkg/IntelTdx/IntelTdxX64.dsc"
+            echo "defines             SECURE_BOOT_ENABLE=FALSE BUILD_SHELL=FALSE FD_SIZE_4MB"
+            echo "PcdUse1GPageTable   $(grep -q 'PcdUse1GPageTable|TRUE' ../../OvmfPkg/IntelTdx/IntelTdxX64.dsc && echo TRUE || echo FALSE) (from DSC)"
+            echo "devenv.lock         sha256 $(sha256sum ../devenv.lock | cut -d' ' -f1)"
+            echo "pinned nixpkgs      $(jq -r '.nodes["nixpkgs-src"].locked.rev' ../devenv.lock)"
+            echo "built by            $RUN_URL"
+            echo
+            echo "Rebuild and compare:"
+            echo "  git clone https://github.com/${{ github.repository }}.git -b ${{ github.ref_name }} && cd edk2"
+            echo "  git submodule update --init --depth 1"
+            echo "  cd devenv_build && devenv shell -- ./build-inteltdx.sh"
+            echo "  sha256sum out/$(basename "$FD")"
+          } > PROVENANCE.txt
+
+          cat PROVENANCE.txt
+          {
+            echo '### IntelTdxX64 firmware (TDVF)'
+            echo
+            echo '```'
+            cat PROVENANCE.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v5
+        with:
+          name: OVMF-inteltdx-${{ inputs.target || 'RELEASE' }}-${{ github.sha }}
+          path: |
+            devenv_build/out/*.fd
+            devenv_build/out/SHA256SUMS
+            devenv_build/out/PROVENANCE.txt
+          if-no-files-found: error
+
+      # Sigstore-signed SLSA provenance, verifiable without a key to manage:
+      #   gh attestation verify --repo ${{ github.repository }} <image>
+      # This proves the asset came from this workflow at this commit. It does
+      # not prove the asset is correct -- only a rebuild does that -- so it
+      # guards the release assets rather than replacing the reproducibility.
+      - name: Attest build provenance
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: devenv_build/out/*.fd
+
+      # Releases, not workflow artifacts, are what nodes provision from:
+      # artifacts expire, need an authenticated API call, and carry no
+      # human-meaningful version. Idempotent so a re-run of a tag build
+      # refreshes the assets instead of failing on an existing release.
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        working-directory: devenv_build/out
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            cat <<'HEADER'
+          Reproducible `OvmfPkg/IntelTdx/IntelTdxX64.dsc` build (TDVF) for Intel TDX guests
+          with Secure Boot disabled, so QEMU direct kernel boot is honoured and the guest
+          kernel does not run in lockdown. This image is the MRTD every guest owner pins.
+
+          ```
+          HEADER
+            cat PROVENANCE.txt
+            cat <<'FOOTER'
+          ```
+
+          The asset below is a cache, not a trust anchor. Rebuild it from this tag with
+          the pinned toolchain and compare the sha256; see `devenv_build/README.md`.
+          FOOTER
+          } > NOTES.md
+
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" --clobber ./*.fd SHA256SUMS PROVENANCE.txt
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag \
+              --title "$GITHUB_REF_NAME" --notes-file NOTES.md \
+              ./*.fd SHA256SUMS PROVENANCE.txt
+          fi
+
+      - name: Upload BaseTools logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: basetools-logs-${{ github.sha }}
+          path: /tmp/edk2_basetools*.log
+          if-no-files-found: ignore
